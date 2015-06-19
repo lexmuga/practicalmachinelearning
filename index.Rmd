@@ -1,0 +1,510 @@
+---
+title: "Quantifying the Weight Lifting Exercise Using R"
+author: "Felix P. Muga II"
+date: "June 14, 2015"
+output: html_document
+---
+
+
+## A. The Problem
+
+Given the data set in the website **(1)** which contains the data recorded from three sensors (accelerometers) each one on the belt, forearm, and dumbbell of six participants who performed barbell lifts correctly and incorrectly in 5 different ways in the experiment conducted by the people from **Groupware\@LES** **(2)**. The problem is to predict the manner in which the participants did the exercise.
+
+## B. Our Strategy
+We shall be solving this problem with the techniques we learned from **Practical Machine Learning** **(3)**, the eighth course of **Johns Hopkins' Data Science Specialization** in **Coursera** using the predictive model **Random Forest** **(4)**.
+
+Our strategy has 3 phases: 
+
+1. **Selection phase** where we select the best model of **Random Forest** on 3 variants using **10\%** of the data set. The 3 variants are:
+    + **Random Forest** with no preprocessing of the data **(5)**.
+    + **Random Forest** with the data preprocessed by **center** and **scale** **(6)**
+    + **Random Forest** with the data preprocessed by **pca** **(7)**
+    
+\bigskip
+    
+2. **Training phase** where we train the best model selected from the first phase with **70\%** of the data set.
+
+3. **Testing phase** where we test the best model with **20\%** of the data set.
+
+
+## C. R Packages Used
+
+We utilized the following **R** packages and their respective functions:
+
+* **base** **(8)**
+* **caret** **(9)**
+* **doParallel** **(10)**
+* **dplyr** **(11)**
+* **lattice** **(12)**
+* **utils** **(13)**
+
+## D. Exploratory Data Analysis
+
+The data set extracted from the file **"pml-training.csv"** has **19,622** observations and **160** variables.
+The last variable **classe** is the desired outcome to be predicted in this project.
+
+The data set from **pm-testing.csv** has **20** observations and **160** variables.
+
+The **pmlTraining** data set is used for building the predictive model while the **pmlTesting** data set is used
+for predicting the observed **classe** of each observation using predictive model we built with the **pmlTraining** data set. 
+
+The two data sets have the **same variable names** except at their respective last indices where **pmlTraining** has **classe** and **pmlTesting** has **problem\_id**.
+
+The variables of the two data sets are arranged in the same order.
+
+### D.1.  Correcting Misspelled Names
+
+```{r readingData, echo=FALSE, message=FALSE}
+pmlTraining <- read.csv("pml-training.csv", header=TRUE)
+pmlTesting <- read.csv("pml-testing.csv", header=TRUE)
+```
+
+```{r correctingNames, echo=FALSE, message=FALSE}
+library(dplyr)
+picthlocation <- grep("picth", names(pmlTraining))
+names(pmlTraining)[picthlocation] <- sub("picth",
+                                         "pitch",
+                                    names(pmlTraining)[picthlocation])
+names(pmlTesting)[picthlocation] <- sub("picth",
+                                         "pitch",
+                                    names(pmlTesting)[picthlocation])
+```
+
+We noticed that the word **pitch** is misspelled as **picth** in the names of the variables. These are located in their respective indices at **`r picthlocation`**. We corrected this typographical error.
+
+### D.2. Deleting 33 Variables with Sparse Entries in pmlTraining data set
+
+```{r deletingBlankVars, echo=FALSE, message=FALSE}
+blankvars <- numeric(0)
+for(i in 1:160){
+blankvars[i] <- sum(as.numeric(pmlTraining[i]==""))
+}
+blanklocations <- which(blankvars==19216)
+pmlTraining <- pmlTraining[-blanklocations]
+pmlTesting <- pmlTesting[-blanklocations]
+```
+
+There are **`r length(blanklocations)`** variables with sparse entries in **pmlTraining** data set. These 
+are located at indexes **`r blanklocations`**. 
+
+In fact the number of blank entries is uniformly **19,216** out of **`r prettyNum(nrow(pmlTraining), big.mark=",")`** possible entries per column in the **pmlTraining** data set.
+
+Hence, we trimmed these 33 variables from **pmlTraining** data set and correspondingly from **pmlTesting** set.
+
+Each of the data set is now reduced from **160** to **`r ncol(pmlTraining)` variables**.
+
+### D.3. Deleting 67 variables each with 19,216 NAs in pmlTraining data set.
+
+```{r deletingNAVars, echo=FALSE, message=FALSE}
+numvars <- ncol(pmlTraining)
+navars <- numeric(0)
+for(i in 1:numvars){
+  navars[i] <- sum(as.numeric(is.na(pmlTraining[i])))
+}
+nalocations <- which(navars == 19216)
+pmlTraining <- pmlTraining[-nalocations]
+pmlTesting <- pmlTesting[-nalocations]
+```
+
+There are **`r length(nalocations)`** variables with **19,216 NAs** out of **`r prettyNum(nrow(pmlTraining), big.mark=",")`** possible entries per column in the **pmlTraining** data set.
+
+Hence, we trimmed these 67 variables from **pmlTraining** data set and correspondingly from **pmlTesting** set.
+
+Each of the data set is reduced from **160** to **127** and eventually to **`r ncol(pmlTraining)` variables**.
+
+### D.4. Finally, deleting 7 more variables
+
+The following 7 variables which we do not consider as essentials in predicting the desired outcomes are deleted from our data sets.
+
+*`r names(pmlTraining)[1:7]`*.
+
+```{r removing4Vars, echo=FALSE, message=FALSE}
+pmlTraining <- pmlTraining[-c(1:7)]
+pmlTesting <- pmlTesting[-c(1:7)]
+```
+
+Finally, there are **`r ncol(pmlTraining)`** variables which we shall consider initially as **predictors**.
+
+### D.5. The outcome variable, **classe**, in **pmlTraining**
+
+The variable **classe** has 5 categories denoted by **A, B, C, D, E**. The chart below shows the percentage of each category and their respective counts which total to **`r prettyNum(nrow(pmlTraining), big.mark=",")`** in the **pmlTraining** data set.
+
+```{r classeVariable, echo=FALSE, message=FALSE}
+tbl1 <- data.frame(table(pmlTraining$classe))
+tbl1a <- data.frame(round(prop.table(table(pmlTraining$classe)),3))
+tbl1 <- cbind(tbl1,tbl1a[2])
+names(tbl1) <- c("classe", "Count", "Proportion")
+```
+
+```{r, echo=FALSE, message=FALSE, include=FALSE}
+#tbl1
+png(file="WLEclasse.png", width=560, height = 360)
+bp <- barplot(table(pmlTraining$classe),
+             xlab = "classe",
+             ylab = "Count",
+             main = "The variable classe in the 'pmlTraining'  Data Set",
+             names.arg=c("A","B","C","D","E"),
+             col="salmon")
+text(bp,0, paste(round(tbl1$Proportion*100,1),"%"), cex=1, pos=3)
+dev.off()
+```
+
+![](WLEclasse.png)
+
+## E. Preparing the Data Set with the **caret** Package
+
+We shall be using the **caret** (short for **classification and regression training**, author: **Max Kuhn**) package in **R** in building our predictive model (9). 
+
+The observations in the  **pmlTraining** data set shall be partitioned into 3 parts corresponding to the 3 phases of our project. But before we create the three data partitions we shall determine which of the 52 variables will be deleted using the **caret** function **nearZeroVar**.
+
+### E.1. No zero covariates and no near zero covariates
+
+**Zero-variance predictors** **(14)** are predictors with a single unique value that will cause the prediction model to fail. There are predictors called the **near-zero variance predictors** **(14)** that may become **zero-variance predictors** due to to the resampling methods in tuning our model. We shall employ the **nearZeroVar** function in the **caret** package to determine these types of predictors.
+
+This function shows that there are **no zero covariates** and **no near zero covariates** among the 52 variables/predictors. See the **zeroVar By nzv Table** below. Hence, we shall be using all these 52 variables in training our model.
+
+```{r usingNZV, echo=FALSE, message=FALSE}
+library(caret)
+nsv <- nearZeroVar(pmlTraining[-53], saveMetrics=TRUE)
+```
+
+```{r nsvTable, echo=TRUE, message=FALSE}
+print(table(nsv$zeroVar,  nsv$nzv)) ## zeroVar by nzv
+```
+
+### E.2. Creating the 3 different random data partitions with various sizes 
+
+We shall create the 3 different random partitions of the **pmlTraining** data set at random using the **caret** function **createDataPartition**. 
+
+1. The first partition is **10\%** of the **pmlTraining data set** for the **selection phase**.
+2. The second partition is **70\%** of the data set for the **training phase**.
+3. The third partition is **20\%** of the data set for the **testing phase**.
+
+We employ **createDataPartition** twice, setting the option **p = 0.8** at the first application of **createDataPartition** , with **80\%** for the **selection and training phases** and **20\%** for the **testing phase**.
+
+For the second application of **createDataPartition**, we set the option **p=0.125**, with **10\%** for the **selection phase** and **70\%** for the **training phase**.
+
+To be able to reproduce the exact copies of the 3 random partitions generated by the function, we use **set.seed(100200300)** at the first usage of **createDataPartition**.
+
+See the table below showing the result of the 3 random partitions of the number of observations and the corresponding partition of the **classe** variable.
+
+```{r creatingDataPartitions, echo=FALSE, message=FALSE}
+set.seed(100200300)
+trainIndex = createDataPartition(pmlTraining$classe, 
+                                 p=0.8, 
+                                 list=FALSE)
+trainingPhase <- pmlTraining[trainIndex,]
+testing <- pmlTraining[-trainIndex,]
+set.seed(100200300)
+selectionIndex <- createDataPartition(trainingPhase$classe,
+                                      p=.125,
+                                      list=FALSE)
+selection <- trainingPhase[selectionIndex,]
+training <- trainingPhase[-selectionIndex,]
+```
+
+```{r buildingClasseTable, echo=FALSE, message=FALSE}
+tableSelection <- table(selection$classe)
+tableTraining <- table(training$classe)
+tableTesting <- table(testing$classe)
+tableClasse <- data.frame(rbind(tableSelection, 
+                                tableTraining,
+                                tableTesting),
+                          row.names = NULL)
+TotalCount <- rowSums(tableClasse)
+Phases <- c("Selection",
+               "Training",
+               "Testing")
+tableClasse <-cbind(Phases, tableClasse, TotalCount)
+tableClasse <- mutate(tableClasse, 
+                      Proportion = round(TotalCount/nrow(pmlTraining),2)
+                      )
+tableClasse
+```
+
+## Selection Phase
+
+The **Random Forest** algorithm was discussed in the third week of the **Practical Machine Learning Course**. This is the **Model of Choice** in this project **(5)**. 
+
+In the second week of the course, 3 preprocessing methods were discussed. These are **center** and **scale**, **BoxCox**, and **pca**. 
+
+We shall be using these methods except **BoxCox** since it is not advisable to use it when there are negative values in the data set.
+
+Hence, we shall be selecting the best model among the 3 variants of **Random Forest** algorithm. These are:
+
+1. **Random Forest** with no preprocessing of the data,
+2. **Random Forest** with the data preprocessed by **center** and **scale**, and
+3. **Random forest** with the data preprocessed by **pca**.
+
+To select the best model we shall be using the **resamples** and **diffs** functions in **caret** as advised by **Max Kuhn** **(14)**. 
+
+```{r usingParallelProcessing, echo=FALSE, message=FALSE, eval=T}
+# enable multi-core processing
+library(doParallel)
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+```
+
+```{r trainControl, echo=FALSE, message=FALSE, eval=TRUE}
+# we use 15 folds
+fitControl <- trainControl(method="cv",
+                           number=15,
+                           savePredictions=TRUE,
+                           classProbs = TRUE
+                           )
+```
+
+
+```{r validatingRFNoPreProc, echo=FALSE, message=FALSE, eval=F}
+set.seed(100200300)
+start.time1 <- Sys.time()
+# training the randomForest model without preprocessing
+rfModel1 <- train(classe ~ .,  
+                data = selection,
+                method = "rf",
+                trControl = fitControl,
+                prox=TRUE,
+                allowParallel=TRUE)
+end.time1 <- Sys.time()
+time.taken1 <- end.time1 - start.time1
+sprintf("Time Taken for Training the RF Model with no PreProc = %f minutes",
+        time.taken1
+        )
+save(rfModel1, file="rfModel1_02.RData")
+```
+
+```{r, echo=FALSE}
+load("rfmodel1_02.RData")
+```
+
+```{r preProcessWithCenterScale, echo=FALSE, message=FALSE, eval=F}
+set.seed(100200300)
+# preprocessing the data with method = c("center", "scale")
+preProc <- preProcess(selection[-53],
+                      method = c("center", "scale"
+                                 )
+                      )
+selectCS <- predict(preProc, selection[-53])
+```
+
+```{r validatingRFWithCS, echo=FALSE, message=FALSE, eval=F}
+set.seed(100200300)
+start.time2 <- Sys.time()
+# training the rf model with data preprocessed by method=c("center","scale")
+rfModel2 <- train(selection$classe ~ .,  
+                data = selectCS,
+                method = "rf",
+                trControl = fitControl,
+                prox=TRUE,
+                allowParallel=TRUE)
+end.time2 <- Sys.time()
+time.taken2 <- end.time2 - start.time2
+sprintf("Time Taken for Training the RF Model PreProc with 'center-scale' = %f minutes",
+        time.taken2
+        )
+save(rfModel2, file="rfModel2_02.RData")
+```
+
+```{r ,echo=FALSE}
+load("rfmodel2_02.RData")
+```
+
+
+
+```{r preProcessWithPCA, echo=FALSE, message=FALSE, eval=F}
+set.seed(100200300)
+# preprocessing the data with method = "pca"
+preProc <- preProcess(selection[-53],
+                      method = "pca",
+                      thresh = 0.99
+                      )
+selectPC <- predict(preProc, selection[-53])
+```
+
+```{r validatingRFWithPCA, echo=FALSE, message=FALSE, eval=F}
+set.seed(100200300)
+start.time3 <- Sys.time()
+# training the rf model with data preprocessed by method="pca"
+rfModel3 <- train(selection$classe ~ .,  
+                data = selectPC,
+                method = "rf",
+                trControl = fitControl,
+                prox=TRUE,
+                allowParallel=TRUE)
+end.time3 <- Sys.time()
+time.taken3 <- end.time3 - start.time3
+sprintf("Time Taken for Training the RF Model PreProc with 'pca' = %f minutes",
+        time.taken3
+        )
+save(rfModel3, file="rfModel3_02.RData")
+```
+
+
+```{r, echo=FALSE}
+load("rfmodel3_02.RData")
+```
+
+Since the **random number seeds** were initialized to the same value prior to training the models, it follows that the same folds where used for each of the three models. Note that in resampling we used 15 folds in cross-validating.
+
+```{r resamplingThreeModels, echo=FALSE, message=FALSE}
+#set.seed(100200300)
+#start.time4 <- Sys.time()
+resampRFs <- resamples(list(rf1=rfModel1,
+                            rf2=rfModel2,
+                            rf3=rfModel3))
+#end.time4 <- Sys.time()
+#time.taken4 <- end.time4 - start.time4
+#sprintf("Time Taken for Resampling = %f minutes", 
+#        time.taken4)
+summary(resampRFs)
+diffRFs <- diff(resampRFs)
+summary(diffRFs)
+```
+
+The function **resamples** in **caret** package performs 15 resamples using the same 15 folds to each of the 3 models. We can compare the 3 models with respect to **Accuracy** and **Kappa** produce by the **resamples** function.
+
+There is a tie for the best model between the **First Model (no Proc)** and the **Second Model (preProc with 'center-scale')** as shown in the **Accuracy** and **Kappa** metrics in **resampling**.
+
+It is confirmed by the $\mathbf{\text{p-value} > 0.05}$ calculated by the **diff** function in both metrics. So we cannot reject the null hypothesis that the respective **Accuracy** and **Kappa** of the **First Model** and **Second Model** are equal.
+
+However since we will be training the best model with about **70\%** of the training data set, we choose the **First Model (no preProc)** as our best model since it is simpler to build compared to the **Second Model (with 'center-scale')**.
+
+## Training Phase
+
+We shall now train our best model with **70\%** of the **pml-training** data set.
+
+```{r trainingBestModel, echo=FALSE, message=FALSE, eval=F}
+set.seed(100200300)
+start.time5 <- Sys.time()
+rfBestModel <- train(classe ~ .,  
+                     data = training,
+                     method = "rf",
+                     trControl = fitControl,
+                     allowParallel=TRUE
+                     )
+end.time5 <- Sys.time()
+time.taken5 <- end.time5 - start.time5
+time.taken5
+sprintf("Time Taken for Training the RF Best Model = %f minutes",
+        time.taken5
+        )
+save(rfBestModel, file="rfBestModel02.RData")
+```
+
+```{r, echo=FALSE}
+load("rfBestModel02.RData")
+```
+
+The training of the model with 70\% of the **pmlTraining** data set took about **21 minutes**.
+
+Professor Leek defined **In-Sample Error** or **Resubstitution Error** "as the error rate you get on the same data set you used to build your predictor" **(15)**. 
+
+We can compute this error by examining the the confusion matrix of the final model (**rfBestModel$finalModel**) which is given below:
+
+```{r, echo=FALSE, message=FALSE}
+cMatrixFinalModel <- rfBestModel$finalModel$confusion
+cMatrixFinalModel[1:5,1:5]
+```
+
+The main diagonal of this matrix contains the **hits** or the **true positives**.
+Thus, setting the main diagonal of this matrix to zero, we get the **in-sample error**. 
+We have the following:
+
+```{r, echo=FALSE, message=FALSE}
+cm <- cMatrixFinalModel[1:5,1:5]
+diag(cm) <- 0
+```
+
+
+```{r, echo=FALSE, message=FALSE}
+IOSError <- round(sum(cm)/nrow(training),4)
+```
+
+* **The number of wrong predictions is `r sum(cm)` out of the `r prettyNum(nrow(training),big.mark=",")` total possible outcomes.**
+
+* **Therefore, the in-sample error  of this Random Forest Model is `r 100*IOSError`\%.**
+
+## Testing Phase
+
+Using the **testing** data set which is 20\% of the **pmlTraining** data set for our **Testing Phase**, we predicted the following results.
+
+```{r, echo=FALSE, message=FALSE}
+results2 <- predict(rfBestModel, newdata=testing)
+tbl2 <- table(results2)
+```
+
+```{r, echo=FALSE, message=FALSE, include=FALSE}
+#tbl1
+png(file="testingClasse.png", width=560, height = 360)
+bp2 <- barplot(table(results2),
+             xlab = "classe",
+             ylab = "Count",
+             main = "The Predicted Results Using the 'testing'  Data Set",
+             names.arg=c("A","B","C","D","E"),
+             col="salmon")
+tbl2a <- round(prop.table(table(results2)),3)
+text(bp2,0, paste(round(tbl2a*100,1),"%"), cex=1, pos=3)
+dev.off()
+```
+
+![](testingClasse.png)
+
+The confusion matrix of the predicted values is given by:
+
+```{r, echo=FALSE, message=FALSE}
+cMatrix2 <- confusionMatrix(results2, testing$classe)
+cMatrix2$table
+cMat <- matrix(cMatrix2$table, nrow=5, ncol=5)
+diag(cMat) <- 0
+OOSError <- round(sum(cMat)/length(results2),3)
+```
+
+The main diagonal is the location of the **hits**. So setting the main diagonal of this matrix to zero we can compute the **out-of-sample error** or the **generalization error**, which is defined by Professor Leek as the "error you get on a new data set". In our case, the new data set is the "testing" data set. **(15)**
+
+Thus, we have the following:
+
+* **The number of wrong predictions is `r sum(cMat)` out of `r prettyNum(length(results2),big.mark=",")` Predictions.**
+
+
+* **Therefore, the Out-of-Sample Error =  `r 100*OOSError`\%**
+
+# Conclusion
+
+The main problem of this project is predict the manner in which the participants did the 5 different ways of lifting the weights.
+
+We believe that we are able to answer this problem using the **Random Forest Model** without any preprocessing. 
+
+The confusion matrix of the **Random Forest BestModel** on the **classe** variable of the **testing** data set  shows an **Accuracy rating of 99.08\%** and the **Kappa rating of 98.84\%**.
+
+# References
+
+(1) https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.
+
+(2) http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises
+
+(3) https://class.coursera.org/predmachlearn-015.
+
+(4) http://cran.r-project.org/web/packages/randomForest/index.html.
+
+(5) Leek, Jeffrey. *Random forests*, Week 3, 3rd Video-Lecture, Practical Machine Learning. https://class.coursera.org/predmachlearn-015/lecture/47.
+
+(6) http://cran.r-project.org/web/packages/randomForest/index.html
+
+(7) https://class.coursera.org/predmachlearn-015/lecture/35.
+
+(8) https://stat.ethz.ch/R-manual/R-devel/library/base/html/00Index.html.
+
+(9) http://cran.r-project.org/web/packages/caret/index.html.
+
+(10) http://cran.r-project.org/web/packages/doParallel/index.html.
+
+(11) http://cran.r-project.org/web/packages/dplyr/index.html.
+
+(12) http://cran.r-project.org/web/packages/lattice/index.html
+
+(13) http://cran.r-project.org/web/packages/R.utils/index.html.
+
+(14) Max Kuhn, *A Short Introduction the caret package*, May 5, 2015
+
+(15) Leek, Jeffrey. *In sample and out of sample error*, Week 1, 4th Video-Lecture. https://class.coursera.org/predmachlearn-015/lecture/11.
+
